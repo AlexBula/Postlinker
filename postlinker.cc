@@ -22,11 +22,6 @@ using std::string;
 using std::unordered_map;
 
 
-typedef struct Context {
-  int file_end;
-  int base_address;
-  int orig_start;
-} Context;
 
 template <typename T>
 void readHeaders(FILE* fd, headerT& elfh, vector<T>& v, int count, int offset) {
@@ -49,7 +44,6 @@ void readSectionEntries(FILE* fd, sectionT& s, vector<T>& sections) {
     --count;
   }
 }
-
 
 void readStrings(FILE* fd, sectionT& s, vector<unordered_map<int, string>>& strings) {
   vector<char> raw_strings(s.sh_size);
@@ -105,6 +99,7 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
     size += sizeof(segmentT);
   }
   size += constants::kPageSize - (size % constants::kPageSize);
+  ctx.created_offset = size;
   for (auto& p : out_segments) {
     if (p.p_vaddr == ctx.base_address) {
       p.p_paddr -= size;
@@ -244,7 +239,7 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
   }
 }
 
-void saveOutput(headerT& output_header, vector<segmentT>& output_segments,
+void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_segments,
                 vector<sectionT>& output_sections, vector<vector<sectionT>>&& rel_sections,
                 FILE* output, FILE* exec) {
 
@@ -258,7 +253,7 @@ void saveOutput(headerT& output_header, vector<segmentT>& output_segments,
       fwrite(&p, 1, sizeof(segmentT), output);
   };
 
-  /* // Save Sections */
+  // Save Sections
   for (auto& s : output_sections) {
       vector<char> tmp(s.sh_size);
       fseek(exec, s.sh_offset, 0);
@@ -275,8 +270,10 @@ void saveOutput(headerT& output_header, vector<segmentT>& output_segments,
   std::cout << "saving under: " << output_header.e_shoff << "\n";
   int i = 0;
   for (auto& s : output_sections) {
-    s.sh_offset = output_header.e_shoff + i * sizeof(sectionT);
-    std::cout << "new offset " << s.sh_offset << "\n";
+    // TODO(fix - offset not correct) IMPORTANT 
+    /* s.sh_offset -= ctx.created_offset; */
+    /* std::cout << "Created off: " << ctx.created_offset << "\n"; */
+    /* std::cout << "new offset " << s.sh_offset << "\n"; */
     fwrite(&s, 1, sizeof(sectionT), output);
     ++i;
   };
@@ -362,7 +359,7 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   addNewSegment(ctx, out_header, output_segments, RWXSections, rel_sections, constants::kRWX);
   makeSpaceForHeaders(ctx, out_header, output_segments, exec_segments);
 
-  saveOutput(out_header, output_segments, output_sections,
+  saveOutput(ctx, out_header, output_segments, output_sections,
              {RSections, RWSections, RXSections, RWXSections}, output, exec);
   /* applyRelocations(ctx, rel, exec, output, rel_header, out_header, exec_sections, rel_sections); */
   return 0;
