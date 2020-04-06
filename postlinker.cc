@@ -122,7 +122,9 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
     }
   }
   auto end = out_segments[org_size - 1].p_offset + out_segments[org_size - 1].p_filesz;
-  header.e_shoff = end + (constants::kPageSize - (end % constants::kPageSize));
+  std::cout << "end : " << end << "\n";
+  /* header.e_shoff = end + (constants::kPageSize - (end % constants::kPageSize)); */
+  header.e_shoff = end;
 }
 
 void addNewSegment(Context& ctx, headerT& header,
@@ -132,11 +134,16 @@ void addNewSegment(Context& ctx, headerT& header,
                    int segment_flags) {
   if (sections.size()) {
     segmentT p;
-    auto& last_segment = segments[segments.size() - 1];
     int size = 0;
     int new_off = ctx.file_end;
 
-    new_off += new_off - (constants::kPageSize % new_off);
+    /* std::cout << "new_off: " << new_off << "\n"; */
+    /* std::cout << "sections_offset + size " << header.e_shoff + sizeof(sectionT) * header.e_shnum << "\n"; */
+    if (new_off % constants::kPageSize != 0) {
+      /* std::cout << "reszta: " << new_off % constants::kPageSize << "\n"; */
+      new_off += constants::kPageSize - (new_off % constants::kPageSize);
+    }
+    /* std::cout << "new_off, po modulo: " << new_off << "\n"; */
     std::for_each(sections.begin(), sections.end(), [&](sectionT s) {
         for(auto& rel_s : rel_sections) {
           if (rel_s.sh_name == s.sh_name) {
@@ -153,8 +160,8 @@ void addNewSegment(Context& ctx, headerT& header,
       p.p_type = PT_LOAD;
       p.p_flags = segment_flags;
       p.p_offset = new_off;
-      p.p_vaddr = ctx.file_end + ctx.base_address;
-      p.p_paddr = ctx.file_end + ctx.base_address;
+      p.p_vaddr = new_off + ctx.base_address;
+      p.p_paddr = new_off + ctx.base_address;
       p.p_filesz = size;
       p.p_memsz = size;
       p.p_align = constants::kPageSize;
@@ -265,14 +272,13 @@ void saveOutput(headerT& output_header, vector<segmentT>& output_segments,
 
   // Saving section headers
   fseek(output, output_header.e_shoff, 0);
-  bool first = true;
+  std::cout << "saving under: " << output_header.e_shoff << "\n";
+  int i = 0;
   for (auto& s : output_sections) {
-    if (first) {
-      first = false;
-    } else {
-      s.sh_offset += constants::kPageSize;
-    }
+    s.sh_offset = output_header.e_shoff + i * sizeof(sectionT);
+    std::cout << "new offset " << s.sh_offset << "\n";
     fwrite(&s, 1, sizeof(sectionT), output);
+    ++i;
   };
 
   // Saving rel sections
@@ -320,6 +326,7 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
               exec_header.e_shnum, exec_header.e_shoff);
   fseek(exec, 0, SEEK_END);
   ctx.file_end = ftell(exec);
+  /* std::cout << "Sections location: " <<ctx.file_end - exec_header.e_shnum * sizeof(sectionT) << "\n"; */
   findBaseAddress(ctx, exec_segments);
 
   out_header = exec_header;
