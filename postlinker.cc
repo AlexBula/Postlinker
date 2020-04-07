@@ -45,36 +45,50 @@ void readSectionEntries(FILE* fd, sectionT& s, vector<T>& sections) {
   }
 }
 
-void readStrings(FILE* fd, sectionT& s, vector<unordered_map<int, string>>& strings) {
+void readStrings(FILE* fd, sectionT& s, vector<char>& strings) {
   vector<char> raw_strings(s.sh_size);
-  string tmp;
-  unordered_map<int, string> section_strings;
 
   fseek(fd, s.sh_offset,0);
   fread((char*)raw_strings.data(), s.sh_size, 1, fd);
-  int i = 0, index = 0;
   for (auto c : raw_strings) {
-    if (c != '\0') {
-      tmp += c;
-    } else if (tmp.size()) {
-      section_strings[index] = tmp;
-      tmp = "";
-      index = i + 1;
-    }
-    ++i;
-  }
-  if (section_strings.size()) {
-    strings.emplace_back(section_strings);
+    strings.emplace_back(c);
   }
 }
 
-string& getSymbolName(symT symbol, vector<unordered_map<int, string>> strings) {
-  for (auto& m : strings) {
-    if (m.find(symbol.st_name) != m.end()) {
-      return m[symbol.st_name];
+string getName(unsigned index, vector<char> strings) {
+  std::string tmp = "";
+  if (index < strings.size() && index >= 0) {
+    char c = strings[index];
+    while (c != '\0') {
+      tmp += c;
+      ++index;
+      c = strings[index];
+    }
+    return tmp;
+  }
+  return "";
+}
+
+bool lookForStart(const vector<symT>& rel_syms,
+                  const vector<char> rel_strings,
+                  const vector<char> rel_section_names,
+                  unsigned long long& start,
+                  vector<vector<sectionT>>& output_new_sections) {
+  for (auto& s : rel_syms) {
+    if (getName(s.st_name, rel_strings) == "_start") {
+      for (auto& v : output_new_sections) {
+        for (auto& new_s : v) {
+          if (getName(new_s.sh_name, rel_section_names) == ".text") {
+            start = new_s.sh_addr + s.st_value;
+            return true;
+          }
+        }
+      }
     }
   }
+  return false;
 }
+
 
 bool correctSymbolType(unsigned int type) {
   return type == STT_NOTYPE || type == STT_FUNC || type == STT_OBJECT || type == STT_SECTION;
@@ -117,8 +131,6 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
     }
   }
   auto end = out_segments[org_size - 1].p_offset + out_segments[org_size - 1].p_filesz;
-  std::cout << "end : " << end << "\n";
-  /* header.e_shoff = end + (constants::kPageSize - (end % constants::kPageSize)); */
   header.e_shoff = end;
 }
 
@@ -132,13 +144,9 @@ void addNewSegment(Context& ctx, headerT& header,
     int size = 0;
     int new_off = ctx.file_end;
 
-    /* std::cout << "new_off: " << new_off << "\n"; */
-    /* std::cout << "sections_offset + size " << header.e_shoff + sizeof(sectionT) * header.e_shnum << "\n"; */
     if (new_off % constants::kPageSize != 0) {
-      /* std::cout << "reszta: " << new_off % constants::kPageSize << "\n"; */
       new_off += constants::kPageSize - (new_off % constants::kPageSize);
     }
-    /* std::cout << "new_off, po modulo: " << new_off << "\n"; */
     std::for_each(sections.begin(), sections.end(), [&](sectionT s) {
         for(auto& rel_s : rel_sections) {
           if (rel_s.sh_name == s.sh_name) {
@@ -170,18 +178,22 @@ void addNewSegment(Context& ctx, headerT& header,
 }
 
 void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
-                      headerT& rel_header, headerT& exec_header,
+                      headerT& output_header, headerT& rel_header,
+                      headerT& exec_header,
                       vector<sectionT>& exec_sections,
-                      vector<sectionT>& rel_sections) {
+                      vector<sectionT>& rel_sections,
+                      vector<vector<sectionT>>& output_new_sections) {
   vector<relT> rels;
   vector<relaT> relas;
   vector<symT> rel_syms, exec_syms;
-  vector<unordered_map<int, string>> rel_strings, exec_strings;
+  vector<char> rel_strings, rel_section_names, exec_strings;
   int section_id = 0;
 
   for (auto& s : rel_sections) {
     if (s.sh_type == SHT_STRTAB && section_id != rel_header.e_shstrndx) {
       readStrings(rel, s, rel_strings);
+    } else if (s.sh_type == SHT_STRTAB && section_id == rel_header.e_shstrndx) {
+      readStrings(rel, s, rel_section_names);
     } else if (s.sh_type == SHT_RELA) {
       readSectionEntries(rel, s, relas);
     } else if (s.sh_type == SHT_REL) {
@@ -205,11 +217,11 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
   for (auto& r : relas) {
     int symbol_address;
     auto& symbol = rel_syms[ELF64_R_SYM(r.r_info)];
-    auto sym_name = getSymbolName(symbol, rel_strings);
+    auto sym_name = getName(symbol.st_name, rel_strings);
     if (correctSymbolType(ELF64_ST_TYPE(symbol.st_info))) {
       if (symbol.st_shndx == SHN_UNDEF) {
         for (auto& exec_s : exec_syms) {
-          if (getSymbolName(exec_s, exec_strings) == sym_name) {
+          if (getName(exec_s.st_name, exec_strings) == sym_name) {
             symbol_address = exec_s.st_value;
             break;
           }
@@ -237,15 +249,20 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
       }
     }
   }
+
+  // Save header
+  unsigned long long start;
+  if(lookForStart(rel_syms, rel_strings, rel_section_names, start, output_new_sections)) {
+    output_header.e_entry = start;
+  }
+  fseek(output, 0, 0);
+  fwrite(&output_header, 1, sizeof(output_header), output);
 }
 
 void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_segments,
-                vector<sectionT>& output_sections, vector<vector<sectionT>>&& rel_sections,
-                FILE* output, FILE* exec) {
+                vector<sectionT>& output_sections, vector<sectionT>& exec_sections,
+                vector<vector<sectionT>>& rel_sections, FILE* output, FILE* exec) {
 
-  fseek(output, 0, 0);
-  // Save header
-  fwrite(&output_header, 1, sizeof(output_header), output);
 
   // Save segment headers
   fseek(output, output_header.e_phoff, 0);
@@ -254,34 +271,38 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
   };
 
   // Save Sections
-  for (auto& s : output_sections) {
-      vector<char> tmp(s.sh_size);
-      fseek(exec, s.sh_offset, 0);
-      fread((char*)tmp.data(), 1, s.sh_size, exec);
-      int pos = ftell(output);
-      if (s.sh_addralign != 0 && pos % s.sh_addralign != 0) {
-        fseek(output, s.sh_addralign - (pos % s.sh_addralign), SEEK_CUR);
+  for (int i = 0; i < output_sections.size(); ++i) {
+    if (i != 0) {
+      auto& o_s = output_sections[i];
+      auto& e_s = exec_sections[i];
+      vector<char> tmp(o_s.sh_size);
+      if (i != 0) {
+        o_s.sh_offset += ctx.created_offset;
       }
-      fwrite(tmp.data(), s.sh_size, sizeof(char), output);
+      fseek(exec, e_s.sh_offset, 0);
+      fread((char*)tmp.data(), 1, e_s.sh_size, exec);
+      fseek(output, o_s.sh_offset, 0);
+      int pos = ftell(output);
+      if (o_s.sh_addralign != 0 && pos % o_s.sh_addralign != 0) {
+        fseek(output, o_s.sh_addralign - (pos % o_s.sh_addralign), SEEK_CUR);
+      }
+      fwrite(tmp.data(), o_s.sh_size, sizeof(char), output);
+    }
   }
+
+  // Save header
+  output_header.e_shoff = ftell(output);
 
   // Saving section headers
   fseek(output, output_header.e_shoff, 0);
-  std::cout << "saving under: " << output_header.e_shoff << "\n";
-  int i = 0;
   for (auto& s : output_sections) {
-    // TODO(fix - offset not correct) IMPORTANT 
-    /* s.sh_offset -= ctx.created_offset; */
-    /* std::cout << "Created off: " << ctx.created_offset << "\n"; */
-    /* std::cout << "new offset " << s.sh_offset << "\n"; */
     fwrite(&s, 1, sizeof(sectionT), output);
-    ++i;
   };
 
   // Saving rel sections
   for (auto& v : rel_sections) {
     auto pos = ftell(output);
-    if (pos % constants::kPageSize == 0) {
+    if (pos % constants::kPageSize != 0) {
       pos += constants::kPageSize - (pos % constants::kPageSize);
       fseek(output, pos, 0);
     }
@@ -291,9 +312,11 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
       fread((char*)tmp.data(), s.sh_size, 1, exec);
 
       pos = ftell(output);
-      if (s.sh_addralign != 0 && pos % s.sh_addralign == 0) {
+      if (s.sh_addralign != 0 && pos % s.sh_addralign != 0) {
         fseek(output, s.sh_addralign - (pos % s.sh_addralign), SEEK_CUR);
       }
+      s.sh_addr = ctx.base_address + ftell(output);
+      std::cout << "base : " << ctx.base_address << ", pos:" << ftell(output) << "\n";
       fwrite(tmp.data(), s.sh_size, sizeof(char), output);
     }
   }
@@ -308,11 +331,6 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   vector<sectionT> exec_sections, rel_sections, output_sections;
   Context ctx;
 
-  /* vector<relaSectionT> rela_sections; */
-  /* vector<symT> symbols; */
-
-
-
   // Executable
   fread((char *)&exec_header, sizeof exec_header, 1, exec);
   ctx.orig_start = exec_header.e_entry;
@@ -323,7 +341,6 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
               exec_header.e_shnum, exec_header.e_shoff);
   fseek(exec, 0, SEEK_END);
   ctx.file_end = ftell(exec);
-  /* std::cout << "Sections location: " <<ctx.file_end - exec_header.e_shnum * sizeof(sectionT) << "\n"; */
   findBaseAddress(ctx, exec_segments);
 
   out_header = exec_header;
@@ -359,9 +376,39 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   addNewSegment(ctx, out_header, output_segments, RWXSections, rel_sections, constants::kRWX);
   makeSpaceForHeaders(ctx, out_header, output_segments, exec_segments);
 
+  vector<vector<sectionT>> chosen_sections = {RSections, RWSections, RXSections, RWXSections};
+
   saveOutput(ctx, out_header, output_segments, output_sections,
-             {RSections, RWSections, RXSections, RWXSections}, output, exec);
-  /* applyRelocations(ctx, rel, exec, output, rel_header, out_header, exec_sections, rel_sections); */
+             exec_sections, chosen_sections, output, exec);
+  applyRelocations(ctx, rel, exec, output, out_header, rel_header,
+                   exec_header, exec_sections, rel_sections, chosen_sections);
+
+  // Sanity checks
+  /* FILE* test = fopen("z1-example/exec-bp", "rb"); */
+
+  /* headerT test_h; */
+  /* vector<segmentT> test_segments; */
+  /* vector<sectionT> test_sections; */
+
+  /* fseek(test, 0, 0); */
+  /* fread((char *)&test_h, sizeof exec_header, 1, test); */
+
+  /* readHeaders(test, test_h, test_segments, */
+  /*             test_h.e_phnum, test_h.e_phoff); */
+  /* readHeaders(test, test_h, test_sections, */
+  /*             test_h.e_shnum, test_h.e_shoff); */
+
+  /* vector<char> test_strings; */
+  /* vector<symT> test_syms; */
+
+  /* std::cout << test_sections.size() << "\n"; */
+  /* for (auto& s : test_sections) { */
+  /*   if (s.sh_type == SHT_STRTAB) { */
+  /*     readStrings(test, s, test_strings); */
+  /*   } else if (s.sh_type == SHT_SYMTAB) { */
+  /*     readSectionEntries(test, s, test_syms); */
+  /*   } */
+  /* } */
   return 0;
 }
 
