@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <unistd.h>
 #include <utility>
+#include <sys/stat.h>
+
 
 using headerT = Elf64_Ehdr;
 using segmentT = Elf64_Phdr;
@@ -154,7 +156,7 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
     }
   }
   auto end = out_segments[org_size - 1].p_offset + out_segments[org_size - 1].p_filesz;
-  header.e_shoff = end;
+  header.e_shoff += ctx.created_offset;
 }
 
 void addNewSegment(Context& ctx, headerT& header,
@@ -163,6 +165,7 @@ void addNewSegment(Context& ctx, headerT& header,
                    vector<sectionT>& rel_sections,
                    int segment_flags) {
   if (sections.size()) {
+    std::cout << "Adding new segment\n";
     segmentT p;
     int size = 0;
     int new_off = ctx.file_end;
@@ -175,6 +178,7 @@ void addNewSegment(Context& ctx, headerT& header,
           if (rel_s.sh_name == s.second.sh_name) {
             rel_s.sh_offset = new_off + size;
             s.second.sh_offset = rel_s.sh_offset;
+            std::cout << "New offset = " << rel_s.sh_offset << "\n";
             break;
           }
         }
@@ -294,8 +298,10 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
   // Save header
   for (auto& s : rel_syms) {
     if(getName(s.st_name, rel_strings) == "_start") {
-    output_header.e_entry = s.st_value + extractSectionInfo(output_new_sections,
-                                                            rel_section_names, ".text", false);
+    output_header.e_entry = s.st_value;
+    auto s_off =  extractSectionInfo(output_new_sections, rel_section_names, ".text", false);
+    output_header.e_entry += s_off;
+    std::cout << "section_offset : " << s_off << "\n";
     std::cout << "start : " << output_header.e_entry << "\n";
     break;
     }
@@ -334,7 +340,7 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
     }
   }
 
-  output_header.e_shoff = ftell(output);
+  /* output_header.e_shoff = ftell(output); */
 
   // Saving section headers
   fseek(output, output_header.e_shoff, 0);
@@ -342,6 +348,7 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
     fwrite(&s, 1, sizeof(sectionT), output);
   };
 
+  fseek(output, ctx.file_end, 0);
   // Saving rel sections
   for (auto& v : rel_sections) {
     if (v.size()) {
@@ -363,16 +370,13 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
         }
         p.second.sh_addr = ctx.base_address + ftell(output);
         p.second.sh_offset = ftell(output);
+        std::cout << "base: " << ctx.base_address << "\n";
         std::cout << "new offset: " << p.second.sh_offset << "\n";
         std::cout << "new_add : " << p.second.sh_offset + ctx.base_address << "\n";
         fwrite(tmp.data(), p.second.sh_size, sizeof(char), output);
       }
     }
   }
-  /* // workaround */
-  /* output_header.e_entry = 0x403000; */
-  /* fseek(output, 0, 0); */
-  /* fwrite(&output_header, 1, sizeof(output_header), output); */
   return;
 }
 
@@ -439,42 +443,6 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
                    rel_header, exec_header, exec_sections,
                    rel_sections, output_sections, chosen_sections);
 
-  // Sanity checks
-  /* FILE* test = fopen("z1-example/exec-orig", "rb"); */
-
-  /* headerT test_h; */
-  /* vector<segmentT> test_segments; */
-  /* vector<sectionT> test_sections; */
-
-  /* fseek(test, 0, 0); */
-  /* fread((char *)&test_h, sizeof exec_header, 1, test); */
-
-  /* readHeaders(test, test_h, test_segments, */
-  /*             test_h.e_phnum, test_h.e_phoff); */
-  /* readHeaders(test, test_h, test_sections, */
-  /*             test_h.e_shnum, test_h.e_shoff); */
-
-  /* vector<char> test_strings; */
-  /* vector<symT> test_syms; */
-
-  /* std::cout << test_sections.size() << "\n"; */
-  /* for (auto& s : test_sections) { */
-  /*   if (s.sh_type == SHT_STRTAB) { */
-  /*     readStrings(test, s, test_strings); */
-  /*   } else if (s.sh_type == SHT_SYMTAB) { */
-  /*     readSectionEntries(test, s, test_syms); */
-  /*   } */
-  /* } */
-
-  /* int k = 0; */
-  /* for (auto& s : test_syms) { */
-  /*   /1* auto name = getName(s.st_name, exec_strings); *1/ */
-  /*   /1* std::cout << "Name : " << name << "\n"; *1/ */
-  /*   /1* std::cout << "Name : " << name << "\n"; *1/ */
-  /*   std::cout << "Num: " << k << ", value: " << s.st_value << ", ndx: " << s.st_shndx << "\n"; */
-  /*   ++k; */
-  /* } */
-
   return 0;
 }
 
@@ -482,11 +450,11 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
 int main(int argc, char **argv) {
 
   if (argc != 4) {
-    std::cout << "Usage: ./poslinker <ET_EXEC> <ET_REL> <output>\n";
+    std::cout << "Usage: ./postlinker <ET_EXEC> <ET_REL> <output>\n";
     return -1;
   }
 
-  string file_error = "Failed to open file:";
+  const string file_error = "Failed to open file:";
 
   FILE *rel = fopen(argv[2], "rb");
   if (!rel) {
@@ -514,6 +482,7 @@ int main(int argc, char **argv) {
     return -1;
   } else {
     closeFiles(exec, rel, output);
+    chmod(argv[3], 0751);
     return 0;
   }
 }
