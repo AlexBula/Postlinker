@@ -23,8 +23,12 @@ bool isPCReference(unsigned int type) {
   return type == R_X86_64_PC32 || type == R_X86_64_PLT32;
 }
 
-bool isAbsReference(unsigned int type) {
-  return type == R_X86_64_64 || type == R_X86_64_32 || type == R_X86_64_32S;
+bool isAbsReference64(unsigned int type) {
+  return type == R_X86_64_64;
+}
+
+bool isAbsReference32(unsigned int type) {
+  return type == R_X86_64_32 || type == R_X86_64_32S;
 }
 
 void LOG_ERROR(const std::string& msg) {
