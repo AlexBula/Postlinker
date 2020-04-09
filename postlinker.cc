@@ -1,68 +1,8 @@
-#include "utils.h"
-
 #include <climits>
 #include <unistd.h>
 #include <sys/stat.h>
 
-/* Save content of each section to correct place in file */
-void saveSectionContent(Context& ctx, FILE* output, FILE* exec,
-                        vector<sectionT>& output_sections,
-                        const vector<sectionT>& exec_sections) {
-  for (uint32_t i = 0; i < output_sections.size(); ++i) {
-    if (i != 0) {
-      auto& o_s = output_sections[i];
-      auto& e_s = exec_sections[i];
-      vector<char> tmp(o_s.sh_size);
-      o_s.sh_offset += ctx.created_offset;
-      HANDLE_ERROR(fseek(exec, e_s.sh_offset, SEEK_SET),
-                   "saveSectionContent: fseek 1");
-      HANDLE_ERROR(fread((char*)tmp.data(), 1, e_s.sh_size, exec),
-                   "saveSectionContent: fread 1");
-      if (o_s.sh_addralign != 0 && o_s.sh_offset % o_s.sh_addralign != 0) {
-        o_s.sh_offset += o_s.sh_addralign - (o_s.sh_offset % o_s.sh_addralign);
-      }
-      HANDLE_ERROR(fseek(output, o_s.sh_offset, SEEK_SET),
-                   "saveSectionContent: fseek 2");
-      HANDLE_ERROR(fwrite(tmp.data(), o_s.sh_size, sizeof(char), output),
-                   "saveSectionContent: fwrite 1");
-    }
-  }
-}
-
-/* Save chosen sections (sections with ALLOC)
- * to the output file */
-void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
-                        indexSecVecT& chosen_sections) {
-
-  for (auto& v : chosen_sections) {
-    if (v.size()) {
-      auto pos = ftell(output);
-      if (pos % constants::kPageSize != 0) {
-        pos += constants::kPageSize - (pos % constants::kPageSize);
-        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
-                     "saveChosenSections: fseek 1");
-      }
-      for (auto& p : v) {
-        vector<char> tmp(p.second.sh_size);
-        HANDLE_ERROR(fseek(rel, p.second.sh_offset, SEEK_SET),
-                     "saveChosenSections: fseek 2");
-        HANDLE_ERROR(fread((char*)tmp.data(), p.second.sh_size, 1, rel),
-                     "saveChosenSections: fread 1");
-
-        pos = ftell(output);
-        auto rest = pos % p.second.sh_addralign;
-        if (p.second.sh_addralign != 0 && rest != 0) {
-          HANDLE_ERROR(fseek(output, p.second.sh_addralign - rest, SEEK_CUR),
-                       "saveChosenSections: fseek 3");
-        }
-        p.second.sh_addr = ctx.base_address + ftell(output);
-        p.second.sh_offset = ftell(output);
-        HANDLE_ERROR(fwrite(tmp.data(), p.second.sh_size, sizeof(char), output),
-                     "saveChosenSections: fwrite 1");
-      }
-    }
-  }
-}
+#include "utils.h"
 
 /* Extract offset or address of a rel section based on its name */
 uint64_t extractSectionInfo(const indexSecVecT& sections,
@@ -161,12 +101,6 @@ void addNewSegment(Context& ctx, headerT& header,
         if (size % s.second.sh_addralign != 0) {
           size += s.second.sh_addralign - (size % s.second.sh_addralign);
         };
-        for(auto& rel_s : rel_sections) {
-          if (rel_s.sh_name == s.second.sh_name) {
-            /* rel_s.sh_offset = new_off + size; */
-            break;
-          }
-        }
         size += s.second.sh_size;
     }
     if (size != 0) {
@@ -303,6 +237,66 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
                "applyRelocations: fwrite 4");
 }
 
+/* Save content of each section to correct place in file */
+void saveSectionContent(Context& ctx, FILE* output, FILE* exec,
+                        vector<sectionT>& output_sections,
+                        const vector<sectionT>& exec_sections) {
+  for (uint32_t i = 0; i < output_sections.size(); ++i) {
+    if (i != 0) {
+      auto& o_s = output_sections[i];
+      auto& e_s = exec_sections[i];
+      vector<char> tmp(o_s.sh_size);
+      o_s.sh_offset += ctx.created_offset;
+      HANDLE_ERROR(fseek(exec, e_s.sh_offset, SEEK_SET),
+                   "saveSectionContent: fseek 1");
+      HANDLE_ERROR(fread((char*)tmp.data(), 1, e_s.sh_size, exec),
+                   "saveSectionContent: fread 1");
+      if (o_s.sh_addralign != 0 && o_s.sh_offset % o_s.sh_addralign != 0) {
+        o_s.sh_offset += o_s.sh_addralign - (o_s.sh_offset % o_s.sh_addralign);
+      }
+      HANDLE_ERROR(fseek(output, o_s.sh_offset, SEEK_SET),
+                   "saveSectionContent: fseek 2");
+      HANDLE_ERROR(fwrite(tmp.data(), o_s.sh_size, sizeof(char), output),
+                   "saveSectionContent: fwrite 1");
+    }
+  }
+}
+
+/* Save chosen sections (sections with ALLOC)
+ * to the output file */
+void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
+                        indexSecVecT& chosen_sections) {
+
+  for (auto& v : chosen_sections) {
+    if (v.size()) {
+      auto pos = ftell(output);
+      if (pos % constants::kPageSize != 0) {
+        pos += constants::kPageSize - (pos % constants::kPageSize);
+        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
+                     "saveChosenSections: fseek 1");
+      }
+      for (auto& p : v) {
+        vector<char> tmp(p.second.sh_size);
+        HANDLE_ERROR(fseek(rel, p.second.sh_offset, SEEK_SET),
+                     "saveChosenSections: fseek 2");
+        HANDLE_ERROR(fread((char*)tmp.data(), p.second.sh_size, 1, rel),
+                     "saveChosenSections: fread 1");
+
+        pos = ftell(output);
+        auto rest = pos % p.second.sh_addralign;
+        if (p.second.sh_addralign != 0 && rest != 0) {
+          HANDLE_ERROR(fseek(output, p.second.sh_addralign - rest, SEEK_CUR),
+                       "saveChosenSections: fseek 3");
+        }
+        p.second.sh_addr = ctx.base_address + ftell(output);
+        p.second.sh_offset = ftell(output);
+        HANDLE_ERROR(fwrite(tmp.data(), p.second.sh_size, sizeof(char), output),
+                     "saveChosenSections: fwrite 1");
+      }
+    }
+  }
+}
+
 /* Save headers and segments data to the output file */
 void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& output_segments,
                 const vector<segmentT>& exec_segments,
@@ -334,7 +328,8 @@ void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& ou
   return;
 }
 
-
+/* Read all headers, find sections to move
+ * create segments, create space, apply relocations */
 int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
 
   Context ctx;
@@ -440,4 +435,3 @@ int main(int argc, char **argv) {
     return 0;
   }
 }
-
