@@ -129,21 +129,24 @@ void addNewSegment(Context& ctx, headerT& header,
   }
 }
 
+/* Calculate and write relocations
+ * Read needed strings and symbol tables
+ * in the beggining */
 void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
                       headerT& output_header, headerT& rel_header,
                       headerT& exec_header,
                       vector<sectionT>& exec_sections,
                       vector<sectionT>& rel_sections,
                       vector<sectionT>& output_sections,
-                      vector<vector<pair<int, sectionT>>>& output_new_sections) {
+                      vector<vector<pair<int, sectionT>>>& chosen_sections) {
   vector<relT> rels;
   vector<pair<string, relaT>> relas;
   vector<symT> rel_syms, exec_syms;
   vector<char> rel_strings, rel_section_names, exec_strings;
-  int section_id = 0;
 
   readStrings(rel, rel_sections[rel_header.e_shstrndx], rel_section_names);
 
+  int section_id = 0;
   for (auto& s : rel_sections) {
     if (s.sh_type == SHT_STRTAB && section_id != rel_header.e_shstrndx) {
       readStrings(rel, s, rel_strings);
@@ -165,17 +168,21 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
     ++section_id;
   }
 
+  /* For each relocation, caculate address/offset
+   * and save it in the file */
   for (auto& r : relas) {
     int32_t symbol_address;
     auto& symbol = rel_syms[ELF64_R_SYM(r.second.r_info)];
     auto sym_name = getName(symbol.st_name, rel_strings);
     int section_offset;
     if (correctSymbolType(ELF64_ST_TYPE(symbol.st_info))) {
-      if (symbol.st_shndx == SHN_UNDEF) {
+      if (symbol.st_shndx != SHN_UNDEF) {
+        section_offset = getSectionOffset(chosen_sections, symbol.st_shndx);
+        symbol_address = section_offset + symbol.st_value + ctx.base_address;
+      } else {
         if (sym_name == "orig_start") {
-          std::cout << "orig_start\n";
           symbol_address = ctx.orig_start;
-          section_offset = extractSectionInfo(output_new_sections,
+          section_offset = extractSectionInfo(chosen_sections,
                                               rel_section_names,
                                               ".text", true);
         } else {
@@ -185,17 +192,13 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
             if (exec_name == sym_name) {
               found = true;
               symbol_address = exec_s.st_value;
-              std::cout << "name: " << exec_name << "\n";
             }
           }
           if (!found) LOG_ERROR("Could not find symbol " + sym_name);
         }
-      } else {
-        section_offset = getSectionOffset(output_new_sections, symbol.st_shndx);
-        symbol_address = section_offset + symbol.st_value + ctx.base_address;
       }
 
-      int32_t rel_section_offset = extractSectionInfo(output_new_sections,
+      int32_t rel_section_offset = extractSectionInfo(chosen_sections,
                                                       rel_section_names, r.first, true);
       int32_t instr_address = rel_section_offset + r.second.r_offset + ctx.base_address;
       auto addend = r.second.r_addend;
@@ -221,23 +224,24 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
   // Save header
   for (auto& s : rel_syms) {
     if(getName(s.st_name, rel_strings) == "_start") {
-    output_header.e_entry = s.st_value + extractSectionInfo(output_new_sections,
-                                                            rel_section_names, ".text", false);
-    break;
+      auto section_offset = extractSectionInfo(chosen_sections,
+                                               rel_section_names, ".text", false);
+      output_header.e_entry = s.st_value + section_offset;
+      break;
     }
   }
-  HANDLE_ERROR(fseek(output, 0, 0), "applyRelocations: fseek 2");
+  HANDLE_ERROR(fseek(output, 0, SEEK_SET), "applyRelocations: fseek 2");
   HANDLE_ERROR(fwrite(&output_header, 1, sizeof(output_header), output),
                "applyRelocations: fwrite 4");
 }
 
-
+/* Save headers and segments data to the output file */
 void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_segments,
                 vector<sectionT>& output_sections, vector<sectionT>& exec_sections,
                 vector<vector<pair<int, sectionT>>>& rel_sections,
                 FILE* output, FILE* exec, FILE* rel) {
   // Save segment headers
-  HANDLE_ERROR(fseek(output, output_header.e_phoff, 0),
+  HANDLE_ERROR(fseek(output, output_header.e_phoff, SEEK_SET),
                "saveOutput: fseek 1");
   for (auto& p : output_segments) {
       HANDLE_ERROR(fwrite(&p, 1, sizeof(segmentT), output),
@@ -272,7 +276,7 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
       auto pos = ftell(output);
       if (pos % constants::kPageSize != 0) {
         pos += constants::kPageSize - (pos % constants::kPageSize);
-        HANDLE_ERROR(fseek(output, pos, 0),
+        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
                      "saveOutput: fseek 4");
       }
       for (auto& p : v) {
@@ -295,9 +299,9 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
       }
     }
   }
-  output_header.e_shoff = ftell(output);
   // Saving section headers
-  HANDLE_ERROR(fseek(output, output_header.e_shoff, 0),
+  output_header.e_shoff = ftell(output);
+  HANDLE_ERROR(fseek(output, output_header.e_shoff, SEEK_SET),
                "saveOutput: fseek 7");
   for (auto& s : output_sections) {
     HANDLE_ERROR(fwrite(&s, 1, sizeof(sectionT), output),
@@ -383,7 +387,6 @@ int main(int argc, char **argv) {
   }
 
   string file_error = "Failed to open file:";
-
   FILE *rel = fopen(argv[2], "rb");
   if (!rel) {
     LOG_ERROR(file_error + argv[2]);
