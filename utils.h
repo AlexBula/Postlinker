@@ -1,4 +1,3 @@
-
 #include "elf.h"
 
 #include <algorithm>
@@ -11,19 +10,19 @@
 #include <utility>
 
 
-using headerT = Elf64_Ehdr;
-using segmentT = Elf64_Phdr;
-using sectionT = Elf64_Shdr;
-
-using relaT = Elf64_Rela;
-using relT = Elf64_Rel;
-using symT = Elf64_Sym;
-
 using std::vector;
 using std::string;
 using std::unordered_map;
 using std::pair;
 
+using headerT = Elf64_Ehdr;
+using segmentT = Elf64_Phdr;
+using sectionT = Elf64_Shdr;
+using indexSecVecT = vector<vector<pair<int, sectionT>>>;
+
+using relaT = Elf64_Rela;
+using relT = Elf64_Rel;
+using symT = Elf64_Sym;
 
 namespace constants {
 
@@ -50,7 +49,7 @@ void LOG_ERROR(const std::string& msg) {
 }
 
 
-void HANDLE_ERROR(int&& res, string&& s) {
+void HANDLE_ERROR(int&& res, const string&& s) {
   if (res < 0) {
     LOG_ERROR(s);
   }
@@ -106,7 +105,7 @@ string getName(unsigned index, vector<char> strings) {
 
 
 template <typename T>
-void readHeaders(FILE* fd, headerT& elfh, vector<T>& v, int count, int offset) {
+void readHeaders(FILE* fd, const headerT& elfh, vector<T>& v, int count, int offset) {
 
   HANDLE_ERROR(fseek(fd, offset, 0),
                "readHeaders: fseek");
@@ -120,7 +119,7 @@ void readHeaders(FILE* fd, headerT& elfh, vector<T>& v, int count, int offset) {
 
 
 template <typename T>
-void readSectionEntries(FILE* fd, sectionT& s, vector<T>& sections) {
+void readSectionEntries(FILE* fd, const sectionT& s, vector<T>& sections) {
   HANDLE_ERROR(fseek(fd, s.sh_offset, SEEK_SET),
                "readSectionEntries: fseek");
   int count = s.sh_size / (sizeof(T));
@@ -134,9 +133,9 @@ void readSectionEntries(FILE* fd, sectionT& s, vector<T>& sections) {
 }
 
 
-void readRelocationEntities(FILE* fd, sectionT& s,
+void readRelocationEntities(FILE* fd, const sectionT& s,
                             vector<pair<string, relaT>>& sections,
-                            vector<char>& section_names) {
+                            const vector<char>& section_names) {
   HANDLE_ERROR(fseek(fd, s.sh_offset, SEEK_SET),
                "readRelocationEntities: fseek");
   int count = s.sh_size / (sizeof(relaT));
@@ -151,7 +150,7 @@ void readRelocationEntities(FILE* fd, sectionT& s,
 }
 
 
-void readStrings(FILE* fd, sectionT& s, vector<char>& strings) {
+void readStrings(FILE* fd, const sectionT& s, vector<char>& strings) {
   vector<char> raw_strings(s.sh_size);
   HANDLE_ERROR(fseek(fd, s.sh_offset, SEEK_SET),
                "readStrings: fseek");

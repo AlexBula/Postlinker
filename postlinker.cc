@@ -4,11 +4,70 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+/* Save content of each section to correct place in file */
+void saveSectionContent(Context& ctx, FILE* output, FILE* exec,
+                        vector<sectionT>& output_sections,
+                        const vector<sectionT>& exec_sections) {
+  for (uint32_t i = 0; i < output_sections.size(); ++i) {
+    if (i != 0) {
+      auto& o_s = output_sections[i];
+      auto& e_s = exec_sections[i];
+      vector<char> tmp(o_s.sh_size);
+      o_s.sh_offset += ctx.created_offset;
+      HANDLE_ERROR(fseek(exec, e_s.sh_offset, SEEK_SET),
+                   "saveSectionContent: fseek 1");
+      HANDLE_ERROR(fread((char*)tmp.data(), 1, e_s.sh_size, exec),
+                   "saveSectionContent: fread 1");
+      if (o_s.sh_addralign != 0 && o_s.sh_offset % o_s.sh_addralign != 0) {
+        o_s.sh_offset += o_s.sh_addralign - (o_s.sh_offset % o_s.sh_addralign);
+      }
+      HANDLE_ERROR(fseek(output, o_s.sh_offset, SEEK_SET),
+                   "saveSectionContent: fseek 2");
+      HANDLE_ERROR(fwrite(tmp.data(), o_s.sh_size, sizeof(char), output),
+                   "saveSectionContent: fwrite 1");
+    }
+  }
+}
+
+/* Save chosen sections (sections with ALLOC)
+ * to the output file */
+void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
+                        indexSecVecT& chosen_sections) {
+
+  for (auto& v : chosen_sections) {
+    if (v.size()) {
+      auto pos = ftell(output);
+      if (pos % constants::kPageSize != 0) {
+        pos += constants::kPageSize - (pos % constants::kPageSize);
+        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
+                     "saveChosenSections: fseek 1");
+      }
+      for (auto& p : v) {
+        vector<char> tmp(p.second.sh_size);
+        HANDLE_ERROR(fseek(rel, p.second.sh_offset, SEEK_SET),
+                     "saveChosenSections: fseek 2");
+        HANDLE_ERROR(fread((char*)tmp.data(), p.second.sh_size, 1, rel),
+                     "saveChosenSections: fread 1");
+
+        pos = ftell(output);
+        auto rest = pos % p.second.sh_addralign;
+        if (p.second.sh_addralign != 0 && rest != 0) {
+          HANDLE_ERROR(fseek(output, p.second.sh_addralign - rest, SEEK_CUR),
+                       "saveChosenSections: fseek 3");
+        }
+        p.second.sh_addr = ctx.base_address + ftell(output);
+        p.second.sh_offset = ftell(output);
+        HANDLE_ERROR(fwrite(tmp.data(), p.second.sh_size, sizeof(char), output),
+                     "saveChosenSections: fwrite 1");
+      }
+    }
+  }
+}
 
 /* Extract offset or address of a rel section based on its name */
-uint64_t extractSectionInfo(vector<vector<pair<int, sectionT>>>& sections,
-                       const vector<char>& section_names,
-                       const string& section_name, bool offset) {
+uint64_t extractSectionInfo(const indexSecVecT& sections,
+                            const vector<char>& section_names,
+                            const string& section_name, bool offset) {
   for (auto& v : sections) {
     for (auto& new_s : v) {
       if (getName(new_s.second.sh_name, section_names) == section_name) {
@@ -25,7 +84,7 @@ uint64_t extractSectionInfo(vector<vector<pair<int, sectionT>>>& sections,
 }
 
 /* Extract offset of a rel section based on its index */
-uint64_t getSectionOffset(const vector<vector<pair<int, sectionT>>>& sections, int index) {
+uint64_t getSectionOffset(const indexSecVecT& sections, int index) {
 
   for (auto& v : sections) {
     for (auto& p : v) {
@@ -40,7 +99,7 @@ uint64_t getSectionOffset(const vector<vector<pair<int, sectionT>>>& sections, i
 
 
 /* Calculate base address */
-void findBaseAddress(Context& ctx, vector<segmentT>& segments) {
+void findBaseAddress(Context& ctx, const vector<segmentT>& segments) {
   uint32_t min = UINT_MAX;
   for (auto& p : segments) {
     if (p.p_type == PT_LOAD && p.p_vaddr < min) {
@@ -55,7 +114,7 @@ void findBaseAddress(Context& ctx, vector<segmentT>& segments) {
  * for new segment headers */
 void makeSpaceForHeaders(Context& ctx, headerT& header,
                          vector<segmentT>& out_segments,
-                         vector<segmentT>& exec_segments) {
+                         const vector<segmentT>& exec_segments) {
   int size = 0;
   auto exec_size = exec_segments.size();
   for (uint32_t i = exec_size; i < out_segments.size(); ++i) {
@@ -87,7 +146,7 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
  * with <segment_flags> permissions */
 void addNewSegment(Context& ctx, headerT& header,
                    vector<segmentT>& segments,
-                   vector<pair<int, sectionT>>& sections,
+                   const vector<pair<int, sectionT>>& sections,
                    vector<sectionT>& rel_sections,
                    int segment_flags) {
   if (sections.size()) {
@@ -104,7 +163,7 @@ void addNewSegment(Context& ctx, headerT& header,
         };
         for(auto& rel_s : rel_sections) {
           if (rel_s.sh_name == s.second.sh_name) {
-            rel_s.sh_offset = new_off + size;
+            /* rel_s.sh_offset = new_off + size; */
             break;
           }
         }
@@ -129,48 +188,11 @@ void addNewSegment(Context& ctx, headerT& header,
   }
 }
 
-/* Calculate and write relocations
- * Read needed strings and symbol tables
- * in the beggining */
-void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
-                      headerT& output_header, headerT& rel_header,
-                      headerT& exec_header,
-                      vector<sectionT>& exec_sections,
-                      vector<sectionT>& rel_sections,
-                      vector<sectionT>& output_sections,
-                      vector<vector<pair<int, sectionT>>>& chosen_sections) {
-  vector<relT> rels;
-  vector<pair<string, relaT>> relas;
-  vector<symT> rel_syms, exec_syms;
-  vector<char> rel_strings, rel_section_names, exec_strings;
-
-  readStrings(rel, rel_sections[rel_header.e_shstrndx], rel_section_names);
-
-  int section_id = 0;
-  for (auto& s : rel_sections) {
-    if (s.sh_type == SHT_STRTAB && section_id != rel_header.e_shstrndx) {
-      readStrings(rel, s, rel_strings);
-    } else if (s.sh_type == SHT_RELA) {
-      readRelocationEntities(rel, s, relas, rel_section_names);
-    } else if (s.sh_type == SHT_SYMTAB) {
-      readSectionEntries(rel, s, rel_syms);
-    }
-    ++section_id;
-  }
-
-  section_id = 0;
-  for (auto& s : exec_sections) {
-    if (s.sh_type == SHT_STRTAB && section_id != exec_header.e_shstrndx) {
-      readStrings(exec, s, exec_strings);
-    } else if (s.sh_type == SHT_SYMTAB) {
-      readSectionEntries(exec, s, exec_syms);
-    }
-    ++section_id;
-  }
-
-  /* For each relocation, caculate address/offset
-   * and save it in the file */
-  for (auto& r : relas) {
+void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
+                      const vector<symT>& rel_syms, const vector<symT>& exec_syms,
+                      const vector<char>& rel_strings, const vector<char>& exec_strings,
+                      const vector<char>& rel_section_names,
+                      const indexSecVecT& chosen_sections) {
     int32_t symbol_address;
     auto& symbol = rel_syms[ELF64_R_SYM(r.second.r_info)];
     auto sym_name = getName(symbol.st_name, rel_strings);
@@ -219,6 +241,52 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
                      "applyRelocations: fwrite 3");
       }
     }
+}
+
+/* Calculate and write relocations
+ * Read needed strings and symbol tables
+ * in the beggining */
+void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
+                      headerT& output_header, const headerT& rel_header,
+                      const headerT& exec_header,
+                      const vector<sectionT>& exec_sections,
+                      const vector<sectionT>& rel_sections,
+                      const vector<sectionT>& output_sections,
+                      const indexSecVecT& chosen_sections) {
+  vector<relT> rels;
+  vector<pair<string, relaT>> relas;
+  vector<symT> rel_syms, exec_syms;
+  vector<char> rel_strings, rel_section_names, exec_strings;
+
+  readStrings(rel, rel_sections[rel_header.e_shstrndx], rel_section_names);
+
+  int section_id = 0;
+  for (auto& s : rel_sections) {
+    if (s.sh_type == SHT_STRTAB && section_id != rel_header.e_shstrndx) {
+      readStrings(rel, s, rel_strings);
+    } else if (s.sh_type == SHT_RELA) {
+      readRelocationEntities(rel, s, relas, rel_section_names);
+    } else if (s.sh_type == SHT_SYMTAB) {
+      readSectionEntries(rel, s, rel_syms);
+    }
+    ++section_id;
+  }
+
+  section_id = 0;
+  for (auto& s : exec_sections) {
+    if (s.sh_type == SHT_STRTAB && section_id != exec_header.e_shstrndx) {
+      readStrings(exec, s, exec_strings);
+    } else if (s.sh_type == SHT_SYMTAB) {
+      readSectionEntries(exec, s, exec_syms);
+    }
+    ++section_id;
+  }
+
+  /* For each relocation, caculate address/offset
+   * and save it in the file */
+  for (auto& r : relas) {
+    handleRelocation(ctx, output, r, rel_syms, exec_syms, rel_strings,
+                     exec_strings, rel_section_names, chosen_sections);
   }
 
   // Save header
@@ -236,9 +304,10 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
 }
 
 /* Save headers and segments data to the output file */
-void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_segments,
-                vector<sectionT>& output_sections, vector<sectionT>& exec_sections,
-                vector<vector<pair<int, sectionT>>>& rel_sections,
+void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& output_segments,
+                const vector<segmentT>& exec_segments,
+                vector<sectionT>& output_sections, const vector<sectionT>& exec_sections,
+                indexSecVecT& chosen_sections,
                 FILE* output, FILE* exec, FILE* rel) {
   // Save segment headers
   HANDLE_ERROR(fseek(output, output_header.e_phoff, SEEK_SET),
@@ -249,63 +318,18 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
   };
 
   // Save Section content
-  for (uint32_t i = 0; i < output_sections.size(); ++i) {
-    if (i != 0) {
-      auto& o_s = output_sections[i];
-      auto& e_s = exec_sections[i];
-      vector<char> tmp(o_s.sh_size);
-      o_s.sh_offset += ctx.created_offset;
-      HANDLE_ERROR(fseek(exec, e_s.sh_offset, SEEK_SET),
-                   "saveOutput: fseek 2");
-      HANDLE_ERROR(fread((char*)tmp.data(), 1, e_s.sh_size, exec),
-                   "saveOutput: fread 1");
-      if (o_s.sh_addralign != 0 && o_s.sh_offset % o_s.sh_addralign != 0) {
-        o_s.sh_offset += o_s.sh_addralign - (o_s.sh_offset % o_s.sh_addralign);
-      }
-      HANDLE_ERROR(fseek(output, o_s.sh_offset, SEEK_SET),
-                   "saveOutput: fseek 3");
-      HANDLE_ERROR(fwrite(tmp.data(), o_s.sh_size, sizeof(char), output),
-                   "saveOutput: fwrite 2");
-    }
-  }
+  saveSectionContent(ctx, output, exec, output_sections, exec_sections);
 
+  // Saving rel chosen sections content
+  saveChosenSections(ctx, output, rel, chosen_sections);
 
-  // Saving rel section content
-  for (auto& v : rel_sections) {
-    if (v.size()) {
-      auto pos = ftell(output);
-      if (pos % constants::kPageSize != 0) {
-        pos += constants::kPageSize - (pos % constants::kPageSize);
-        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
-                     "saveOutput: fseek 4");
-      }
-      for (auto& p : v) {
-        vector<char> tmp(p.second.sh_size);
-        HANDLE_ERROR(fseek(rel, p.second.sh_offset, SEEK_SET),
-                     "saveOutput: fseek 5");
-        HANDLE_ERROR(fread((char*)tmp.data(), p.second.sh_size, 1, rel),
-                     "saveOutput: fread 2");
-
-        pos = ftell(output);
-        auto rest = pos % p.second.sh_addralign;
-        if (p.second.sh_addralign != 0 && rest != 0) {
-          HANDLE_ERROR(fseek(output, p.second.sh_addralign - rest, SEEK_CUR),
-                       "saveOutput: fseek 6");
-        }
-        p.second.sh_addr = ctx.base_address + ftell(output);
-        p.second.sh_offset = ftell(output);
-        HANDLE_ERROR(fwrite(tmp.data(), p.second.sh_size, sizeof(char), output),
-                     "saveOutput: fwrite 3");
-      }
-    }
-  }
   // Saving section headers
   output_header.e_shoff = ftell(output);
   HANDLE_ERROR(fseek(output, output_header.e_shoff, SEEK_SET),
-               "saveOutput: fseek 7");
+               "saveOutput: fseek 2");
   for (auto& s : output_sections) {
     HANDLE_ERROR(fwrite(&s, 1, sizeof(sectionT), output),
-                 "saveOutput: fwrite 4");
+                 "saveOutput: fwrite 2");
   };
   return;
 }
@@ -313,10 +337,11 @@ void saveOutput(Context& ctx, headerT& output_header, vector<segmentT>& output_s
 
 int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
 
+  Context ctx;
   headerT exec_header, rel_header, out_header;
   vector<segmentT> exec_segments, output_segments;
   vector<sectionT> exec_sections, rel_sections, output_sections;
-  Context ctx;
+  vector<pair<int, sectionT>> RSections, RWSections, RXSections, RWXSections;
 
   // Executable content
   HANDLE_ERROR(fread((char *)&exec_header, sizeof exec_header, 1, exec),
@@ -327,23 +352,21 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
               exec_header.e_phnum, exec_header.e_phoff);
   readHeaders(exec, exec_header, exec_sections,
               exec_header.e_shnum, exec_header.e_shoff);
-  HANDLE_ERROR(fseek(exec, 0, SEEK_END),
-               "runPostlinker: fseek 1");
-  ctx.file_end = ftell(exec);
-  findBaseAddress(ctx, exec_segments);
 
   out_header = exec_header;
   output_segments = exec_segments;
   output_sections = exec_sections;
+
+  findBaseAddress(ctx, exec_segments);
+  HANDLE_ERROR(fseek(exec, 0, SEEK_END),
+               "runPostlinker: fseek 1");
+  ctx.file_end = ftell(exec);
 
   // Relocatable content
   HANDLE_ERROR(fread((char *)&rel_header, sizeof rel_header, 1, rel),
                "runPostlinker: fread 2");
   readHeaders(rel, rel_header, rel_sections,
               rel_header.e_shnum, rel_header.e_shoff);
-
-
-  vector<pair<int, sectionT>> RSections, RWSections, RXSections, RWXSections;
 
   int section_id = 0;
   for (auto& s : rel_sections) {
@@ -362,15 +385,15 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
     ++section_id;
   }
 
+  /* Add new segment for each unique type of sections */
   addNewSegment(ctx, out_header, output_segments, RSections, rel_sections, constants::kR);
   addNewSegment(ctx, out_header, output_segments, RWSections, rel_sections, constants::kRW);
   addNewSegment(ctx, out_header, output_segments, RXSections, rel_sections, constants::kRX);
   addNewSegment(ctx, out_header, output_segments, RWXSections, rel_sections, constants::kRWX);
   makeSpaceForHeaders(ctx, out_header, output_segments, exec_segments);
 
-  vector<vector<pair<int, sectionT>>> chosen_sections = {RSections, RWSections, RXSections, RWXSections};
-
-  saveOutput(ctx, out_header, output_segments, output_sections,
+  indexSecVecT chosen_sections = {RSections, RWSections, RXSections, RWXSections};
+  saveOutput(ctx, out_header, output_segments, exec_segments, output_sections,
              exec_sections, chosen_sections, output, exec, rel);
   applyRelocations(ctx, rel, exec, output, out_header,
                    rel_header, exec_header, exec_sections,
@@ -383,34 +406,34 @@ int main(int argc, char **argv) {
 
   if (argc != 4) {
     std::cout << "Usage: ./poslinker <ET_EXEC> <ET_REL> <OUTPUT>\n";
-    return -1;
+    return 1;
   }
 
   string file_error = "Failed to open file:";
   FILE *rel = fopen(argv[2], "rb");
   if (!rel) {
     LOG_ERROR(file_error + argv[2]);
-    return -1;
+    return 1;
   }
 
   FILE *exec = fopen(argv[1], "rb");
   if (!exec) {
     LOG_ERROR(file_error + argv[1]);
     closeFiles(rel);
-    return -1;
+    return 1;
   }
 
   FILE *output = fopen(argv[3], "w+");
   if (!output) {
     LOG_ERROR(file_error + argv[3]);
     closeFiles(rel, exec);
-    return -1;
+    return 1;
   }
 
   if (runPostlinker(exec, rel, output)) {
     LOG_ERROR("Postlinker failed");
     closeFiles(exec, rel, output);
-    return -1;
+    return 1;
   } else {
     closeFiles(exec, rel, output);
     HANDLE_ERROR(chmod(argv[3], 0755), "main: chmod");
