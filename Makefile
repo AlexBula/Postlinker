@@ -1,12 +1,13 @@
 CC=g++
+FLAGS=-Wall -Werror
 
 all: postlinker clean
 
-postlinker: postlinker.o 
-	$(CC) postlinker.o -o postlinker
+postlinker: postlinker.o
+	$(CC) $(FLAGS) postlinker.o -o postlinker
 
 postlinker.o: postlinker.cc
-	$(CC) postlinker.cc -c
+	$(CC) -Wall -Werror postlinker.cc -c
 
 clean:
 	rm -f *.o
