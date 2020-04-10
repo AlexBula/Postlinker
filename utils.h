@@ -36,7 +36,7 @@ const int kPageSize = 0x1000;
 
 
 typedef struct Context {
-  int last_segment;
+  int file_end;
   uint32_t base_address;
   int orig_start;
   int created_offset;
