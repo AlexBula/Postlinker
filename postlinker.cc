@@ -248,38 +248,62 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
 
 /* Save content of each section to correct place in file */
 void saveSectionContent(Context& ctx, FILE* output, FILE* exec,
-                        const vector<segmentT>& output_segments,
-                        const vector<segmentT>& exec_segments) {
-  for (uint32_t i = 0; i < exec_segments.size(); ++i) {
-    /* if (i != 0) { */
-      auto& o_p = output_segments[i];
-      auto& e_p = exec_segments[i];
-      vector<char> tmp(e_p.p_filesz);
-      HANDLE_ERROR(fseek(exec, e_p.p_offset, SEEK_SET),
+                        vector<sectionT>& output_sections,
+                        const vector<sectionT>& exec_sections) {
+  for (uint32_t i = 0; i < output_sections.size(); ++i) {
+    if (i != 0) {
+      auto& o_s = output_sections[i];
+      auto& e_s = exec_sections[i];
+      vector<char> tmp(o_s.sh_size);
+      o_s.sh_offset += ctx.created_offset;
+      HANDLE_ERROR(fseek(exec, e_s.sh_offset, SEEK_SET),
                    "saveSectionContent: fseek 1");
-      HANDLE_ERROR(fread((char*)tmp.data(), e_p.p_filesz, 1, exec),
+      HANDLE_ERROR(fread((char*)tmp.data(), 1, e_s.sh_size, exec),
                    "saveSectionContent: fread 1");
-      std::cout << "Saving under " << o_p.p_offset << "\n";
-      HANDLE_ERROR(fseek(output, o_p.p_offset, SEEK_SET),
+      if (o_s.sh_addralign != 0 && o_s.sh_offset % o_s.sh_addralign != 0) {
+        o_s.sh_offset += o_s.sh_addralign - (o_s.sh_offset % o_s.sh_addralign);
+      }
+      HANDLE_ERROR(fseek(output, o_s.sh_offset, SEEK_SET),
                    "saveSectionContent: fseek 2");
-      HANDLE_ERROR(fwrite(tmp.data(), e_p.p_filesz, sizeof(char), output),
+      HANDLE_ERROR(fwrite(tmp.data(), o_s.sh_size, sizeof(char), output),
                    "saveSectionContent: fwrite 1");
-    /* } */
+    }
   }
 }
+/* void saveSectionContent(Context& ctx, FILE* output, FILE* exec, */
+/*                         const vector<segmentT>& output_segments, */
+/*                         const vector<segmentT>& exec_segments) { */
+/*   for (uint32_t i = 0; i < exec_segments.size(); ++i) { */
+/*     /1* if (i != 0) { *1/ */
+/*       auto& o_p = output_segments[i]; */
+/*       auto& e_p = exec_segments[i]; */
+/*       vector<char> tmp(e_p.p_filesz); */
+/*       HANDLE_ERROR(fseek(exec, e_p.p_offset, SEEK_SET), */
+/*                    "saveSectionContent: fseek 1"); */
+/*       HANDLE_ERROR(fread((char*)tmp.data(), e_p.p_filesz, 1, exec), */
+/*                    "saveSectionContent: fread 1"); */
+/*       std::cout << "Saving under " << o_p.p_offset << "\n"; */
+/*       HANDLE_ERROR(fseek(output, o_p.p_offset, SEEK_SET), */
+/*                    "saveSectionContent: fseek 2"); */
+/*       HANDLE_ERROR(fwrite(tmp.data(), e_p.p_filesz, sizeof(char), output), */
+/*                    "saveSectionContent: fwrite 1"); */
+/*     /1* } *1/ */
+/*   } */
+/* } */
 
 /* Save chosen sections (sections with ALLOC)
  * to the output file */
 void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
-                        indexSecVecT& chosen_sections) {
+                        indexSecVecT& chosen_sections,
+                        unordered_map<int, uint64_t>& offset_map) {
   for (auto& v : chosen_sections) {
     if (v.size()) {
-      auto pos = ftell(output);
-      if (pos % constants::kPageSize != 0) {
-        pos += constants::kPageSize - (pos % constants::kPageSize);
-        HANDLE_ERROR(fseek(output, pos, SEEK_SET),
-                     "saveChosenSections: fseek 1");
-      }
+      /* auto pos = ftell(output); */
+      /* if (pos % constants::kPageSize != 0) { */
+      /*   pos += constants::kPageSize - (pos % constants::kPageSize); */
+      /*   HANDLE_ERROR(fseek(output, pos, SEEK_SET), */
+      /*                "saveChosenSections: fseek 1"); */
+      /* } */
       for (auto& p : v) {
         vector<char> tmp(p.second.sh_size);
         HANDLE_ERROR(fseek(rel, p.second.sh_offset, SEEK_SET),
@@ -287,14 +311,10 @@ void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
         HANDLE_ERROR(fread((char*)tmp.data(), p.second.sh_size, 1, rel),
                      "saveChosenSections: fread 1");
 
-        pos = ftell(output);
-        auto rest = pos % p.second.sh_addralign;
-        if (p.second.sh_addralign != 0 && rest != 0) {
-          HANDLE_ERROR(fseek(output, p.second.sh_addralign - rest, SEEK_CUR),
-                       "saveChosenSections: fseek 3");
-        }
+        fseek(output, offset_map[p.first], SEEK_SET);
         p.second.sh_addr = ctx.base_address + ftell(output);
         p.second.sh_offset = ftell(output);
+        std::cout << "Section daving under: " << ftell(output) << "\n";
         HANDLE_ERROR(fwrite(tmp.data(), p.second.sh_size, sizeof(char), output),
                      "saveChosenSections: fwrite 1");
       }
@@ -310,7 +330,7 @@ void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& ou
                 FILE* output, FILE* exec, FILE* rel) {
 
   // Save Exec Section content
-  saveSectionContent(ctx, output, exec, output_segments, exec_segments);
+  saveSectionContent(ctx, output, exec, output_sections, exec_sections);
 
   // Save segment headers
   HANDLE_ERROR(fseek(output, output_header.e_phoff, SEEK_SET),
@@ -338,7 +358,7 @@ void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& ou
       }
     }
   }
-  /* saveChosenSections(ctx, output, rel, chosen_sections); */
+  /* saveChosenSections(ctx, output, rel, chosen_sections, offset_map); */
 
   // Saving section headers
   fseek(output, 0, SEEK_END);
@@ -346,10 +366,11 @@ void saveOutput(Context& ctx, headerT& output_header, const vector<segmentT>& ou
   HANDLE_ERROR(fseek(output, output_header.e_shoff, SEEK_SET),
                "saveOutput: fseek 2");
 
-  bool first = true;
+  /* bool first = true; */
   for (auto& s : output_sections) {
-    if (!first) s.sh_offset += ctx.created_offset;
-    else first = false;
+    std::cout << "last offset " << s.sh_offset << "\n";
+    /* if (!first) s.sh_offset += ctx.created_offset; */
+    /* else first = false; */
     std::cout << "off: " << s.sh_offset << ", pos: " << ftell(output) << "\n";
     HANDLE_ERROR(fwrite(&s, 1, sizeof(sectionT), output),
                  "saveOutput: fwrite 2");
