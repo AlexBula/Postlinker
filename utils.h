@@ -87,6 +87,7 @@ void closeFiles(Args... args) {
         };
       }
   });
+  return;
 }
 
 
@@ -116,6 +117,7 @@ void readHeaders(FILE* fd, const headerT& elfh, vector<T>& v, int count, int off
                  "readHeaders: fread");
     v.emplace_back(tmp);
   }
+  return;
 }
 
 
@@ -131,6 +133,7 @@ void readSectionEntries(FILE* fd, const sectionT& s, vector<T>& sections) {
     sections.emplace_back(sec);
     --count;
   }
+  return;
 }
 
 
@@ -148,6 +151,7 @@ void readRelocationEntities(FILE* fd, const sectionT& s,
     sections.emplace_back(std::make_pair(section_name, sec));
     --count;
   }
+  return;
 }
 
 
@@ -158,4 +162,47 @@ void readStrings(FILE* fd, const sectionT& s, vector<char>& strings) {
   HANDLE_ERROR(fread((char*)raw_strings.data(), s.sh_size, 1, fd),
                "readStrings: fread");
   strings = raw_strings;
+  return;
+}
+
+
+uint64_t extractSectionInfo(const indexSecVecT& sections,
+                            const vector<char>& section_names,
+                            unordered_map<int, uint64_t>& offset_map,
+                            const string& section_name) {
+  for (auto& v : sections) {
+    for (auto& new_s : v) {
+      if (getName(new_s.second.sh_name, section_names) == section_name) {
+        return offset_map[new_s.first];
+      }
+    }
+  }
+  LOG_ERROR("Could not find the section: " + section_name);
+  return 0;
+}
+
+
+uint64_t getSectionOffset(const indexSecVecT& sections, int index) {
+
+  for (auto& v : sections) {
+    for (auto& p : v) {
+      if (p.first == index) {
+        return p.second.sh_offset;
+      }
+    }
+  }
+  LOG_ERROR("Could not find section with id: " + index);
+  return 0;
+}
+
+
+void findBaseAddress(Context& ctx, const vector<segmentT>& segments) {
+  uint32_t min = UINT_MAX;
+  for (auto& p : segments) {
+    if (p.p_type == PT_LOAD && p.p_vaddr < min) {
+      min = p.p_vaddr;
+    }
+  }
+  ctx.base_address = min;
+  return;
 }

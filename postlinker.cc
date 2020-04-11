@@ -4,48 +4,6 @@
 
 #include "utils.h"
 
-/* Extract offset or address of a rel section based on its name */
-uint64_t extractSectionInfo(const indexSecVecT& sections,
-                            const vector<char>& section_names,
-                            unordered_map<int, uint64_t>& offset_map,
-                            const string& section_name) {
-  for (auto& v : sections) {
-    for (auto& new_s : v) {
-      if (getName(new_s.second.sh_name, section_names) == section_name) {
-        return offset_map[new_s.first];
-      }
-    }
-  }
-  LOG_ERROR("Could not find the section: " + section_name);
-  return 0;
-}
-
-/* Extract offset of a rel section based on its index */
-uint64_t getSectionOffset(const indexSecVecT& sections, int index) {
-
-  for (auto& v : sections) {
-    for (auto& p : v) {
-      if (p.first == index) {
-        return p.second.sh_offset;
-      }
-    }
-  }
-  LOG_ERROR("Could not find section with id: " + index);
-  return 0;
-}
-
-
-/* Calculate base address */
-void findBaseAddress(Context& ctx, const vector<segmentT>& segments) {
-  uint32_t min = UINT_MAX;
-  for (auto& p : segments) {
-    if (p.p_type == PT_LOAD && p.p_vaddr < min) {
-      min = p.p_vaddr;
-    }
-  }
-  ctx.base_address = min;
-}
-
 
 /* Move bottom segment down in order to make space
  * for new segment headers */
@@ -88,6 +46,7 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
   for (auto& v : offset_map) {
     v.second += constants::kPageSize;
   }
+  return;
 }
 
 /* Add new segment containg passed sections
@@ -99,7 +58,6 @@ void addNewSegment(Context& ctx, headerT& header,
                    unordered_map<int, uint64_t>& offset_map,
                    int segment_flags) {
   if (sections.size()) {
-    std::cout << "Adding new segment\n";
     segmentT p;
     int size = 0;
     int new_off = ctx.file_end;
@@ -129,8 +87,13 @@ void addNewSegment(Context& ctx, headerT& header,
       ctx.file_end += size;
     }
   }
+  return;
 }
 
+/* Handle single relocation
+ * - calculate symbol value
+ * - calculate adress or difference
+ * - write it to the output file */
 void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
                       const vector<symT>& rel_syms, const vector<symT>& exec_syms,
                       const vector<char>& rel_strings, const vector<char>& exec_strings,
@@ -185,6 +148,7 @@ void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
                    "handleRelocation: fwrite 3");
     }
   }
+  return;
 }
 
 /* Calculate and write relocations
@@ -246,6 +210,7 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
   HANDLE_ERROR(fseek(output, 0, SEEK_SET), "applyRelocations: fseek 2");
   HANDLE_ERROR(fwrite(&output_header, 1, sizeof(output_header), output),
                "applyRelocations: fwrite 4");
+  return;
 }
 
 /* Copy exec file to the output with a offset */
@@ -268,6 +233,7 @@ void saveSegmentContent(FILE* output, FILE* exec) {
       }
     }
   }
+  return;
 }
 
 /* Save chosen sections (sections with ALLOC)
@@ -292,6 +258,7 @@ void saveChosenSections(Context& ctx, FILE* output, FILE* rel,
       }
     }
   }
+  return;
 }
 
 /* Save headers and segments data to the output file */
@@ -344,26 +311,22 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   vector<pair<int, sectionT>> RSections, RWSections, RXSections, RWXSections;
   unordered_map<int, uint64_t> offset_map;
 
-  // Executable content
+  /* ET_EXEC */
   HANDLE_ERROR(fread((char *)&exec_header, sizeof exec_header, 1, exec),
                "runPostlinker: fread 1");
-  ctx.orig_start = exec_header.e_entry;
 
   readHeaders(exec, exec_header, exec_segments,
               exec_header.e_phnum, exec_header.e_phoff);
   readHeaders(exec, exec_header, exec_sections,
               exec_header.e_shnum, exec_header.e_shoff);
 
-  out_header = exec_header;
-  output_segments = exec_segments;
-  output_sections = exec_sections;
-
   findBaseAddress(ctx, exec_segments);
   HANDLE_ERROR(fseek(exec, 0, SEEK_END),
                "runPostlinker: fseek 1");
   ctx.file_end = ftell(exec);
+  ctx.orig_start = exec_header.e_entry;
 
-  // Relocatable content
+  /* ET_REL */
   HANDLE_ERROR(fread((char *)&rel_header, sizeof rel_header, 1, rel),
                "runPostlinker: fread 2");
   readHeaders(rel, rel_header, rel_sections,
@@ -386,6 +349,12 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
     ++section_id;
   }
 
+  /* OUTPUT */
+  out_header = exec_header;
+  output_segments = exec_segments;
+  output_sections = exec_sections;
+
+  /* Start linking */
   addNewSegment(ctx, out_header, output_segments, RSections,
                 rel_sections, offset_map, constants::kR);
   addNewSegment(ctx, out_header, output_segments, RWSections,
@@ -397,6 +366,7 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   makeSpaceForHeaders(ctx, out_header, output_segments, exec_segments, offset_map);
 
   indexSecVecT chosen_sections = {RSections, RWSections, RXSections, RWXSections};
+
   saveOutput(ctx, out_header, output_segments, exec_segments, rel_sections, output_sections,
              exec_sections, chosen_sections, offset_map, output, exec, rel);
   applyRelocations(ctx, rel, exec, output, out_header, rel_header, exec_header,
@@ -433,13 +403,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (runPostlinker(exec, rel, output)) {
-    LOG_ERROR("Postlinker failed");
-    closeFiles(exec, rel, output);
-    return 1;
-  } else {
-    closeFiles(exec, rel, output);
-    HANDLE_ERROR(chmod(argv[3], 0755), "main: chmod");
-    return 0;
-  }
+  runPostlinker(exec, rel, output);
+  closeFiles(exec, rel, output);
+  HANDLE_ERROR(chmod(argv[3], 0755), "main: chmod");
+  return 0;
 }
