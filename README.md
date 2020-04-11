@@ -5,7 +5,7 @@ Link object files to an already compiled executable file.
 Program takes two input files: one exectuable and one relocatable and one output file (new exec created from combining both input files).
 
 Firstly it reads all header data from both files, then copies the
-content of the **ET_EXEC** file to the **OUTPUT_FILE** with a **PAGE_SIZE** offset (`0x1000`)
+content of the **ET_EXEC** file to the **OUTPUT_FILE** with a **PAGE_SIZE** offset (`0x1000`).
 
 Then sections with `ALLOC` flag are chosen from the **ET_REL** file in order to create
 matching segments in the **OUTPUT_FILE**.
