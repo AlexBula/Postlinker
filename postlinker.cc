@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+
 #include "utils.h"
 
 /* Extract offset or address of a rel section based on its name */
@@ -99,6 +100,7 @@ void addNewSegment(Context& ctx, headerT& header,
                    unordered_map<int, uint64_t>& offset_map,
                    int segment_flags) {
   if (sections.size()) {
+    std::cout << "Adding new segment\n";
     segmentT p;
     int size = 0;
     int new_off = ctx.file_end;
