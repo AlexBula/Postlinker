@@ -7,15 +7,12 @@
 /* Extract offset or address of a rel section based on its name */
 uint64_t extractSectionInfo(const indexSecVecT& sections,
                             const vector<char>& section_names,
+                            unordered_map<int, uint64_t>& offset_map,
                             const string& section_name, bool offset) {
   for (auto& v : sections) {
     for (auto& new_s : v) {
       if (getName(new_s.second.sh_name, section_names) == section_name) {
-        if (offset) {
-          return new_s.second.sh_offset;
-        } else {
-          return new_s.second.sh_addr;
-        }
+        return offset_map[new_s.first];
       }
     }
   }
@@ -47,6 +44,7 @@ void findBaseAddress(Context& ctx, const vector<segmentT>& segments) {
     }
   }
   ctx.base_address = min;
+  std::cout << "Seting new base " << ctx.base_address << "\n";
 }
 
 
@@ -76,13 +74,13 @@ void makeSpaceForHeaders(Context& ctx, headerT& header,
     if (p.p_offset < segment_off) {
       p.p_paddr = std::max(int64_t(p.p_paddr - constants::kPageSize), int64_t(0));
       p.p_vaddr = std::max(int64_t(p.p_vaddr - constants::kPageSize), int64_t(0));
-      ctx.base_address = p.p_paddr;
       if (p.p_type == PT_LOAD) {
         p.p_memsz += constants::kPageSize;
         p.p_filesz += constants::kPageSize;
       }
     }
   }
+  findBaseAddress(ctx, out_segments);
   //out_segments[0].p_paddr = out_segments[0].p_vaddr -= offset;
   for (auto& p : out_segments) {
     if (p.p_type != PT_PHDR && p.p_offset != 0) {
@@ -141,7 +139,8 @@ void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
                       const vector<symT>& rel_syms, const vector<symT>& exec_syms,
                       const vector<char>& rel_strings, const vector<char>& exec_strings,
                       const vector<char>& rel_section_names,
-                      const indexSecVecT& chosen_sections) {
+                      const indexSecVecT& chosen_sections,
+                      unordered_map<int, uint64_t>& offset_map) {
     int32_t symbol_address;
     auto& symbol = rel_syms[ELF64_R_SYM(r.second.r_info)];
     auto sym_name = getName(symbol.st_name, rel_strings);
@@ -155,6 +154,7 @@ void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
           symbol_address = ctx.orig_start;
           section_offset = extractSectionInfo(chosen_sections,
                                               rel_section_names,
+                                              offset_map,
                                               ".text", true);
         } else {
           bool found = false;
@@ -170,8 +170,14 @@ void handleRelocation(Context& ctx, FILE* output, pair<string, relaT>& r,
       }
 
       int32_t rel_section_offset = extractSectionInfo(chosen_sections,
-                                                      rel_section_names, r.first, true);
+                                                      rel_section_names,
+                                                      offset_map,
+                                                      r.first, true);
       int32_t instr_address = rel_section_offset + r.second.r_offset + ctx.base_address;
+      std::cout << "Section offset " << section_offset << "\n";
+      std::cout << "Rel section offset " << rel_section_offset << "\n";
+      std::cout << "Insr address " << instr_address << "\n";
+      std::cout << "base_address " << ctx.base_address << "\n";
       auto addend = r.second.r_addend;
       uint64_t r_type = ELF64_R_TYPE(r.second.r_info);
       HANDLE_ERROR(fseek(output, instr_address - ctx.base_address, SEEK_SET),
@@ -201,7 +207,8 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
                       const vector<sectionT>& exec_sections,
                       const vector<sectionT>& rel_sections,
                       const vector<sectionT>& output_sections,
-                      const indexSecVecT& chosen_sections) {
+                      const indexSecVecT& chosen_sections,
+                      unordered_map<int, uint64_t>& offset_map) {
   vector<relT> rels;
   vector<pair<string, relaT>> relas;
   vector<symT> rel_syms, exec_syms;
@@ -235,15 +242,18 @@ void applyRelocations(Context& ctx, FILE* rel, FILE* exec, FILE* output,
    * and save it in the file */
   for (auto& r : relas) {
     handleRelocation(ctx, output, r, rel_syms, exec_syms, rel_strings,
-                     exec_strings, rel_section_names, chosen_sections);
+                     exec_strings, rel_section_names, chosen_sections,
+                     offset_map);
   }
 
   // Save header
   for (auto& s : rel_syms) {
     if(getName(s.st_name, rel_strings) == "_start") {
       auto section_offset = extractSectionInfo(chosen_sections,
-                                               rel_section_names, ".text", false);
-      output_header.e_entry = s.st_value + section_offset;
+                                               rel_section_names,
+                                               offset_map,
+                                               ".text", false);
+      output_header.e_entry = s.st_value + section_offset + ctx.base_address;
       /* output_header.e_entry = 0x403000; */
       break;
     }
@@ -474,9 +484,8 @@ int runPostlinker(FILE *exec, FILE *rel, FILE *output) {
   indexSecVecT chosen_sections = {RSections, RWSections, RXSections, RWXSections};
   saveOutput(ctx, out_header, output_segments, exec_segments, rel_sections, output_sections,
              exec_sections, chosen_sections, offset_map, output, exec, rel);
-  // applyRelocations(ctx, rel, exec, output, out_header,
-  //                  rel_header, exec_header, exec_sections,
-  //                  rel_sections, output_sections, chosen_sections);
+  applyRelocations(ctx, rel, exec, output, out_header, rel_header, exec_header,
+                   exec_sections, rel_sections, output_sections, chosen_sections, offset_map);
   return 0;
 }
 
