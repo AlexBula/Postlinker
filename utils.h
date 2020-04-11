@@ -39,7 +39,6 @@ typedef struct Context {
   int file_end;
   uint32_t base_address;
   int orig_start;
-  int created_offset;
 } Context;
 
 
