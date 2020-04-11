@@ -1,3 +1,5 @@
+#pragma once
+
 #include "elf.h"
 
 #include <algorithm>

@@ -4,8 +4,6 @@
 
 #include "utils.h"
 
-#include "utils.h"
-
 /* Extract offset or address of a rel section based on its name */
 uint64_t extractSectionInfo(const indexSecVecT& sections,
                             const vector<char>& section_names,
